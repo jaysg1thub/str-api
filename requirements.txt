@@ -4,3 +4,4 @@ sqlalchemy==2.0.35
 psycopg[binary]>=3.2.2
 pypdf
 anthropic
+stripe

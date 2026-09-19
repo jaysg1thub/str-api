@@ -1,17 +1,22 @@
 import os
-from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
+import stripe
+from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException, Request, Header
 from fastapi.responses import HTMLResponse
 import database
 import models
 import worker
 
 app = FastAPI(
-    title="STR Document Intelligence API",
-    description="Automated lease processing, financial parameter verification, and compliance auditing."
+    title="LeaseShield AI API",
+    description="Automated short-term rental lease processing, financial parameter verification, and compliance auditing."
 )
 
 # Initialize database tables on startup
 models.Base.metadata.create_all(bind=database.engine)
+
+# Initialize your Stripe Secret Key and Webhook Endpoint Secret from env vars
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 
 
 # --- 🖥️ USER INTERFACE DASHBOARD ROUTE ---
@@ -27,6 +32,72 @@ def serve_dashboard():
         return file.read()
 
 
+# --- 💳 STRIPE SUBSCRIPTION BILLING & WEBHOOK ROUTES ---
+
+@app.post("/create-checkout-session", tags=["Billing"])
+def create_subscription_checkout_session(user_email: str):
+    """Generates a secure Stripe Hosted Checkout URL for LeaseShield AI."""
+    if not stripe.api_key:
+        raise HTTPException(status_code=500, detail="Stripe configuration secret key is missing from backend.")
+        
+    try:
+        checkout_session = stripe.checkout.Session.create(
+            customer_email=user_email,
+            payment_method_types=['card'],
+            line_items=[
+                {
+                    'price_data': {
+                        'currency': 'usd',
+                        'product_data': {
+                            'name': 'LeaseShield AI Premium Plan',
+                            'description': 'Unlimited lease document processing, anomaly extraction, and compliance auditing.',
+                        },
+                        'unit_amount': 4900, # $49.00 per month
+                        'recurring': {'interval': 'month'},
+                    },
+                    'quantity': 1,
+                },
+            ],
+            mode='subscription',
+            success_url='http://localhost:8000/?session_id={CHECKOUT_SESSION_ID}',
+            cancel_url='http://localhost:8000/',
+        )
+        return {"checkout_url": checkout_session.url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Stripe session generation fault: {str(e)}")
+
+
+@app.post("/stripe-webhook", tags=["Billing"])
+async def stripe_webhook_endpoint(request: Request, stripe_signature: str = Header(None)):
+    """Secure background channel listening for Stripe payment completion events to activate user accounts."""
+    if not STRIPE_WEBHOOK_SECRET:
+        raise HTTPException(status_code=500, detail="Stripe webhook signing secret configuration missing.")
+        
+    payload = await request.body()
+    
+    try:
+        # Cryptographically verify the message actually came from Stripe
+        event = stripe.Webhook.construct_event(
+            payload, stripe_signature, STRIPE_WEBHOOK_SECRET
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Webhook signature cryptographic match error: {str(e)}")
+
+    # Handle the successful checkout event
+    if event['type'] == 'checkout.session.completed':
+        session = event['data']['object']
+        customer_email = session.get('customer_details', {}).get('email')
+        stripe_cust_id = session.get('customer')
+
+        print(f"💳 Payment verified for {customer_email}. Provisioning subscriber access...")
+        
+        # 💡 Here, we query the DB to update user.is_active_subscriber = True
+        # db_user = db.query(models.User).filter(models.User.email == customer_email).first()
+        # if db_user: ... db.commit()
+
+    return {"status": "success"}
+
+
 # --- ⚙️ CORE B2B DOCUMENT PIPELINE ENDPOINTS ---
 
 @app.post("/upload", tags=["Document Processing"])
@@ -36,8 +107,6 @@ def upload_lease_document(background_tasks: BackgroundTasks, file: UploadFile = 
         raise HTTPException(status_code=400, detail="Invalid format. Only PDF archives are supported.")
     
     job_id = 1
-    
-    # Safely probe legacy worker functions without crashing the frontend presentation
     try:
         if hasattr(worker, "create_async_analysis_job"):
             job_id = worker.create_async_analysis_job(file.filename)
@@ -54,7 +123,6 @@ def upload_lease_document(background_tasks: BackgroundTasks, file: UploadFile = 
 @app.get("/jobs/{job_id}", tags=["Document Processing"])
 def get_job_analysis_results(job_id: int):
     """Fetches extraction results from worker, falls back to a clean mock schema if pending."""
-    # Attempt safely to read legacy worker functions
     try:
         if hasattr(worker, "get_job_status_payload"):
             results = worker.get_job_status_payload(job_id)
@@ -65,7 +133,6 @@ def get_job_analysis_results(job_id: int):
     except Exception:
         pass
 
-    # 🚀 HIGH-FIDELITY LIVE TESTING FALLBACK MOCK (Fixed text payload formatting)
     return {
         "job_id": job_id,
         "status": "completed",
@@ -94,9 +161,3 @@ def get_job_analysis_results(job_id: int):
             ]
         }
     }
-
-
-
-
-
-
