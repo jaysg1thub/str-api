@@ -67,33 +67,59 @@ def create_subscription_checkout_session(user_email: str):
         raise HTTPException(status_code=500, detail=f"Stripe session generation fault: {str(e)}")
 
 
+# Locate your /stripe-webhook endpoint block inside main.py and replace it with this database-active script:
+
 @app.post("/stripe-webhook", tags=["Billing"])
 async def stripe_webhook_endpoint(request: Request, stripe_signature: str = Header(None)):
-    """Secure background channel listening for Stripe payment completion events to activate user accounts."""
+    """Secure channel listening for Stripe checkout completion to toggle user access inside crm_db."""
     if not STRIPE_WEBHOOK_SECRET:
         raise HTTPException(status_code=500, detail="Stripe webhook signing secret configuration missing.")
         
     payload = await request.body()
     
     try:
-        # Cryptographically verify the message actually came from Stripe
+        # Validate that the network packet string cryptographically matches your signature
         event = stripe.Webhook.construct_event(
             payload, stripe_signature, STRIPE_WEBHOOK_SECRET
         )
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Webhook signature cryptographic match error: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Webhook signature validation error: {str(e)}")
 
-    # Handle the successful checkout event
+    # 🚀 EXECUTING DATABASE UPDATES UPON SUCCESSFUL CHECKOUT
     if event['type'] == 'checkout.session.completed':
         session = event['data']['object']
         customer_email = session.get('customer_details', {}).get('email')
         stripe_cust_id = session.get('customer')
 
-        print(f"💳 Payment verified for {customer_email}. Provisioning subscriber access...")
+        print(f"💳 [Webhook Alert] Verified payment received for: {customer_email}")
         
-        # 💡 Here, we query the DB to update user.is_active_subscriber = True
-        # db_user = db.query(models.User).filter(models.User.email == customer_email).first()
-        # if db_user: ... db.commit()
+        # Open an isolated transactional session frame directly against your PostgreSQL container rails
+        db = database.SessionLocal()
+        try:
+            # Query your users table schema for a matching profile row record
+            db_user = db.query(models.User).filter(models.User.email == customer_email).first()
+            
+            if db_user:
+                # If they already exist, update their account metadata parameters
+                db_user.stripe_customer_id = stripe_cust_id
+                db_user.is_active_subscriber = True
+                print(f"✅ Existing database record updated for {customer_email}. Premium status: ACTIVE.")
+            else:
+                # Fallback: Provision a clean User identity row if they checked out dynamically
+                new_user = models.User(
+                    email=customer_email,
+                    stripe_customer_id=stripe_cust_id,
+                    is_active_subscriber=True
+                )
+                db.add(new_user)
+                print(f"➕ New subscription profile record auto-generated for {customer_email}. Premium status: ACTIVE.")
+                
+            db.commit() # Safely flash-commit the record transaction parameters to disk
+        except Exception as db_err:
+            db.rollback()
+            print(f"❌ Critical database write anomaly inside billing webhook logic: {str(db_err)}")
+        finally:
+            db.close() # Free up the data pool socket connection link
 
     return {"status": "success"}
 
