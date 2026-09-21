@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: leaseshield-deployment
+  namespace: default
+  labels:
+    app: leaseshield-ai
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: leaseshield-ai
+  template:
+    metadata:
+      labels:
+        app: leaseshield-ai
+    spec:
+      imagePullSecrets:
+      - name: ocirsecret
+      containers:
+      - name: leaseshield-engine
+        # 🚀 TARGETING YOUR UPDATED V1.0.1 IMAGE TAG MAPPING STRIPS
+        image: iad.ocir.io/idombxchtgfq/leaseshield-ai:v1.0.1
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          value: "postgresql+psycopg://postgres:admin@host.docker.internal:5432/str_db"
+        - name: STRIPE_SECRET_KEY
+          value: "${STRIPE_SECRET_KEY}"
+        - name: STRIPE_WEBHOOK_SECRET
+          value: "whsec_dummy_local_test_key"
